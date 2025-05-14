@@ -60,6 +60,20 @@ function broadcastOnlineUsers() {
 io.on("connection", async (socket) => {
   console.log("✅ New socket connected:", socket.id);
 
+  // Add handler for getting router RTP capabilities
+  socket.on('getRouterRtpCapabilities', (callback) => {
+    try {
+      if (!router) {
+        throw new Error('Router not initialized');
+      }
+      const rtpCapabilities = router.rtpCapabilities;
+      callback(rtpCapabilities);
+    } catch (error) {
+      console.error('Error getting router RTP capabilities:', error);
+      callback(null);
+    }
+  });
+
   socket.on("login", (username) => {
     try {
       if (!username || typeof username !== "string") {
