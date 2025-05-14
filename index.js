@@ -50,11 +50,12 @@ async function initializeMediasoup() {
   console.log('Mediasoup worker and router initialized');
 }
 
-// Track online users: { username: socketId }
+// Track online users: { username: { socketId, roomId } }
 const onlineUsers = {};
 
 function broadcastOnlineUsers() {
-  io.emit("online-users", Object.keys(onlineUsers));
+  const users = Object.keys(onlineUsers).filter(username => onlineUsers[username].socketId);
+  io.emit("online-users", users);
 }
 
 io.on("connection", async (socket) => {
@@ -81,8 +82,18 @@ io.on("connection", async (socket) => {
         return;
       }
 
+      // Check if username is already taken
+      if (onlineUsers[username] && onlineUsers[username].socketId) {
+        socket.emit("error", "Username already taken");
+        return;
+      }
+
       socket.username = username;
-      onlineUsers[username] = socket.id;
+      onlineUsers[username] = {
+        socketId: socket.id,
+        roomId: null
+      };
+      
       console.log(`👤 ${username} logged in`);
       broadcastOnlineUsers();
     } catch (error) {
@@ -236,48 +247,117 @@ io.on("connection", async (socket) => {
   // Handle disconnection
   socket.on("disconnect", () => {
     try {
-      // Remove from online users
       if (socket.username) {
-        delete onlineUsers[socket.username];
-        broadcastOnlineUsers();
-      }
-
-      // Handle room cleanup
-      for (const [roomId, room] of rooms.entries()) {
-        if (room.participants.has(socket.id)) {
-          const participant = room.participants.get(socket.id);
-          
-          // Close all consumers
-          for (const consumer of participant.consumers) {
-            consumer.close();
-          }
-
-          // Close producer if exists
-          if (participant.producer) {
-            participant.producer.close();
-          }
-
-          // Close transport
-          participant.transport.close();
-
-          // Remove participant
-          room.participants.delete(socket.id);
-
-          // Notify others
-          socket.to(roomId).emit("participant-left", {
-            username: participant.username,
+        // If user was in a room, notify others
+        const userInfo = onlineUsers[socket.username];
+        if (userInfo && userInfo.roomId) {
+          socket.to(userInfo.roomId).emit("participant-left", {
+            username: socket.username
           });
-
-          // Remove room if empty
-          if (room.participants.size === 0) {
-            rooms.delete(roomId);
-          }
-
-          break;
         }
+        
+        // Remove user from online users
+        delete onlineUsers[socket.username];
+        console.log(`❌ ${socket.username} disconnected`);
+        broadcastOnlineUsers();
       }
     } catch (error) {
       console.error("Disconnect error:", error);
+    }
+  });
+
+  // Handle call requests
+  socket.on("call-user", ({ toUserId, offer }) => {
+    try {
+      if (!toUserId || !offer) {
+        socket.emit("error", "Invalid call data");
+        return;
+      }
+
+      const targetUser = onlineUsers[toUserId];
+      if (!targetUser || !targetUser.socketId) {
+        socket.emit("error", "User not found");
+        return;
+      }
+
+      io.to(targetUser.socketId).emit("incoming-call", {
+        fromUserId: socket.username,
+        offer
+      });
+    } catch (error) {
+      console.error("Call error:", error);
+      socket.emit("error", "Call failed");
+    }
+  });
+
+  // Handle call answers
+  socket.on("answer-call", ({ toUserId, answer }) => {
+    try {
+      if (!toUserId || !answer) {
+        socket.emit("error", "Invalid answer data");
+        return;
+      }
+
+      const targetUser = onlineUsers[toUserId];
+      if (!targetUser || !targetUser.socketId) {
+        socket.emit("error", "User not found");
+        return;
+      }
+
+      io.to(targetUser.socketId).emit("call-answered", {
+        fromUserId: socket.username,
+        answer
+      });
+    } catch (error) {
+      console.error("Answer error:", error);
+      socket.emit("error", "Answer failed");
+    }
+  });
+
+  // Handle call rejections
+  socket.on("reject-call", ({ toUserId }) => {
+    try {
+      if (!toUserId) {
+        socket.emit("error", "Invalid user ID");
+        return;
+      }
+
+      const targetUser = onlineUsers[toUserId];
+      if (!targetUser || !targetUser.socketId) {
+        socket.emit("error", "User not found");
+        return;
+      }
+
+      io.to(targetUser.socketId).emit("call-rejected", {
+        fromUserId: socket.username
+      });
+    } catch (error) {
+      console.error("Reject error:", error);
+      socket.emit("error", "Reject failed");
+    }
+  });
+
+  // Handle ICE candidates
+  socket.on("ice-candidate", ({ toUserId, candidate }) => {
+    try {
+      if (!toUserId || !candidate) {
+        socket.emit("error", "Invalid ICE candidate data");
+        return;
+      }
+
+      const targetUser = onlineUsers[toUserId];
+      if (!targetUser || !targetUser.socketId) {
+        socket.emit("error", "User not found");
+        return;
+      }
+
+      io.to(targetUser.socketId).emit("ice-candidate", {
+        fromUserId: socket.username,
+        candidate
+      });
+    } catch (error) {
+      console.error("ICE candidate error:", error);
+      socket.emit("error", "ICE candidate failed");
     }
   });
 });
